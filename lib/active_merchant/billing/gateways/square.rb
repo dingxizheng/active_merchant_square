@@ -2,10 +2,10 @@ module ActiveMerchant #:nodoc:
   module Billing #:nodoc:
     class SquareGateway < Gateway
 
+      PRO_URL = 'https://connect.squareup.com/v2/'
+      TEST_URL = 'https://connect.squareupsandbox.com/v2/'
 
       # test uses a 'sandbox' access token, same URL
-      self.live_url = 'https://connect.squareup.com/v2/'
-
       self.money_format = :cents
       self.supported_countries = ['US', 'CA', 'JP', 'GB', 'AU']
       self.default_currency = 'USD'
@@ -44,7 +44,8 @@ module ActiveMerchant #:nodoc:
         @client_id = options[:login].strip
         @bearer_token = options[:password].strip
         @location_id = options[:location_id].strip
-
+        @test_mode = options[:test_mode]
+        self.live_url = @test_mode ? TEST_URL : PRO_URL
         super
       end
 
@@ -78,11 +79,12 @@ module ActiveMerchant #:nodoc:
             ' options[:customer][:card_id], choose one.')
         end
 
-        post = options.slice(:buyer_email_address, :delay_capture, :note,
+        post = options.slice(:buyer_email_address, :autocomplete, :note,
             :reference_id)
         add_idempotency_key(post, options)
         add_amount(post, money, options)
         add_address(post, options)
+        post[:autocomplete] = true
         post[:reference_id] = options[:order_id] if options[:order_id]
         post[:note] = options[:description] if options[:description]
 
@@ -111,7 +113,7 @@ module ActiveMerchant #:nodoc:
           end
 
           add_payment(post, card_nonce, options)
-          r.process { commit(:post, "locations/#{@location_id}/transactions", post) }
+          r.process { commit(:post, "payments", post) }
         end
       end
 
@@ -122,7 +124,7 @@ module ActiveMerchant #:nodoc:
       #
       # See purchase for more details for calling this.
       def authorize(money, card_nonce, options={})
-        options[:delay_capture] = true
+        options[:autocomplete] = false
         purchase(money, card_nonce, options)
       end
 
@@ -131,28 +133,28 @@ module ActiveMerchant #:nodoc:
       # Both `money` and `options` are unused. Only a full capture is supported.
       def capture(ignored_money, txn_id, ignored_options={})
         raise ArgumentError('txn_id required') if txn_id.nil?
-        commit(:post, "locations/#{CGI.escape(@location_id)}/transactions/#{CGI.escape(txn_id)}/capture")
+        commit(:post, "payments/#{CGI.escape(txn_id)}/complete")
       end
 
       # Refund refunds a previously Charged transaction.
       # https://docs.connect.squareup.com/api/connect/v2/#endpoint-createrefund
-      # Options require: `tender_id`, and permit `idempotency_key`, `reason`.
+      # Options require: and permit `idempotency_key`, `reason`.
       def refund(money, txn_id, options={})
         raise ArgumentError('txn_id required') if txn_id.nil?
         raise ArgumentError('money required') if money.nil?
-        requires!(options, :tender_id)
 
-        post = options.slice(:tender_id, :reason)
+        post = options.slice(:reason)
         add_idempotency_key(post, options)
         add_amount(post, money, options)
-        commit(:post, "locations/#{CGI.escape(@location_id)}/transactions/#{CGI.escape(txn_id)}/refund", post)
+        post[:payment_id] = txn_id
+        commit(:post, "refunds", post)
       end
 
       # Void cancels a delayed capture (not-yet-captured) transaction.
       # https://docs.connect.squareup.com/api/connect/v2/#endpoint-voidtransaction
       def void(txn_id, options={})
         raise ArgumentError('txn_id required') if txn_id.nil?
-        commit(:post, "locations/#{CGI.escape(@location_id)}/transactions/#{CGI.escape(txn_id)}/void")
+        commit(:post, "payments/#{CGI.escape(txn_id)}/cancel", post)
       end
 
       # Do an Authorize (Charge with delayed capture) and then Void.
@@ -296,10 +298,10 @@ module ActiveMerchant #:nodoc:
           requires!(options, :customer)
           requires!(options[:customer], :id, :card_id)
           post[:customer_id] = options[:customer][:id]
-          post[:customer_card_id] = options[:customer][:card_id]
+          post[:source_id] = options[:customer][:card_id]
         else
           # use nonce
-          post[:card_nonce] = card_nonce
+          post[:source_id] = card_nonce
         end
       end
 
@@ -342,12 +344,12 @@ module ActiveMerchant #:nodoc:
       end
 
       def authorization_from(response)
-        if response['transaction']
+        if response['payment']
           # This will return the transaction level identifier, of which there
           # is >= 1 nested tender id which you may need to look up depending
           # on your use case (e.g. refunding). That is available in the
           # response.transaction.tenders array.
-          return response['transaction']['id']
+          return response['payment']['id']
         end
       end
 
